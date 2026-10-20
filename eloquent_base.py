@@ -10,7 +10,7 @@ class MassAssignmentError(Exception):
 
 
 # =====================================================================
-# ARSITEKTUR RELATIONSHIPS & DESCRIPTOR (has_many & belongs_to)
+# ARSITEKTUR RELATIONSHIPS & DESCRIPTOR (has_many & belongs_to & BelongsToMany)
 # =====================================================================
 
 class Relation:
@@ -89,25 +89,25 @@ class BelongsTo(Relation):
         super().__init__(related_cls, child, foreign_key, owner_key)
 
     def _add_constraints(self) -> None:
-        # Ambil foreign key langsung dari _attributes milik instance anak (self.parent)
-        fk_val = self.parent._attributes.get(self.foreign_key)
+        # Ambil foreign key dengan fallback ke getattr jika tidak ada di _attributes
+        fk_val = self.parent._attributes.get(self.foreign_key, getattr(self.parent, self.foreign_key, None))
         if fk_val is not None:
             self.query.where(self.owner_key, fk_val)
 
     def get_results(self) -> Optional['Model']:
-        fk_val = self.parent._attributes.get(self.foreign_key)
+        fk_val = self.parent._attributes.get(self.foreign_key, getattr(self.parent, self.foreign_key, None))
         if fk_val is None:
             return None
-        # Pastikan constraint diterapkan ulang pada query instance yang segar
+        # Pastikan query segar dan constraint diterapkan kembali
         self.query = self.related_cls.query()
         self._add_constraints()
         return self.query.first()
 
     def match_eager(self, models: List['Model'], relation_name: str, nested: List[str] = None) -> None:
         fk_values = list({
-            m._attributes.get(self.foreign_key)
-            for m in models
-            if m._attributes.get(self.foreign_key) is not None
+            val for m in models
+            for val in [m._attributes.get(self.foreign_key, getattr(m, self.foreign_key, None))]
+            if val is not None
         })
         if not fk_values:
             for m in models:
@@ -120,13 +120,113 @@ class BelongsTo(Relation):
         related_models = builder.get()
 
         mapped: Dict[Any, 'Model'] = {
-            rel_model._attributes.get(self.owner_key): rel_model
+            rel_model._attributes.get(self.owner_key, getattr(rel_model, self.owner_key, None)): rel_model
             for rel_model in related_models
         }
 
         for m in models:
-            fk_val = m._attributes.get(self.foreign_key)
+            fk_val = m._attributes.get(self.foreign_key, getattr(m, self.foreign_key, None))
             m._relations[relation_name] = mapped.get(fk_val, None)
+
+
+class BelongsToMany(Relation):
+    def __init__(
+            self,
+            related_cls: Type['Model'],
+            parent: 'Model',
+            pivot_table: str,
+            foreign_pivot_key: str,
+            related_pivot_key: str,
+            parent_key: str,
+            related_key: str
+    ):
+        self.pivot_table = pivot_table
+        self.foreign_pivot_key = foreign_pivot_key
+        self.related_pivot_key = related_pivot_key
+        self.parent_key = parent_key
+        self.related_key = related_key
+        super().__init__(related_cls, parent, foreign_pivot_key, parent_key)
+
+    def _clear_cache(self) -> None:
+        """Membersihkan cache relasi pada parent agar data ditarik ulang dari DB."""
+        for rel_name, rel_obj in list(self.parent._relations.items()):
+            if rel_obj is self or (hasattr(rel_obj, "_relation_factory") and rel_obj._relation_factory() is self):
+                del self.parent._relations[rel_name]
+
+    def _add_constraints(self) -> None:
+        if self.parent._exists:
+            parent_val = self.parent._attributes.get(self.parent_key)
+            table = self.related_cls.get_table_name()
+            pk = self.related_cls.primary_key
+            self.query = self.related_cls.query()
+            self.query._selects = [f"{table}.*"]
+
+            conn = DatabaseManager.get_connection(self.parent.connection_name)
+            cursor = conn.cursor()
+            pivot_sql = f"SELECT {self.related_pivot_key} FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ?"
+            cursor.execute(pivot_sql, (parent_val,))
+            related_ids = [row[0] for row in cursor.fetchall()]
+
+            if related_ids:
+                self.query.where_in(pk, related_ids)
+            else:
+                self.query.where(pk, "=", -1)
+
+    def get_results(self) -> List['Model']:
+        if not self.parent._exists:
+            return []
+        self._add_constraints()
+        return self.query.get()
+
+    def attach(self, id_or_model: Union[int, 'Model']) -> None:
+        if not self.parent._exists:
+            raise ValueError("Tidak dapat melakukan attach pada model yang belum disimpan ke database.")
+
+        related_id = id_or_model.id if isinstance(id_or_model, Model) else id_or_model
+        parent_val = self.parent._attributes.get(self.parent_key)
+
+        conn = DatabaseManager.get_connection(self.parent.connection_name)
+        cursor = conn.cursor()
+        sql = f"INSERT OR IGNORE INTO {self.pivot_table} ({self.foreign_pivot_key}, {self.related_pivot_key}) VALUES (?, ?)"
+        cursor.execute(sql, (parent_val, related_id))
+        conn.commit()
+
+        # Bersihkan cache agar data ter-refresh secara otomatis
+        self._clear_cache()
+
+    def detach(self, id_or_model: Optional[Union[int, 'Model']] = None) -> None:
+        if not self.parent._exists:
+            return
+
+        parent_val = self.parent._attributes.get(self.parent_key)
+        conn = DatabaseManager.get_connection(self.parent.connection_name)
+        cursor = conn.cursor()
+
+        if id_or_model is None:
+            sql = f"DELETE FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ?"
+            cursor.execute(sql, (parent_val,))
+        else:
+            related_id = id_or_model.id if isinstance(id_or_model, Model) else id_or_model
+            sql = f"DELETE FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ? AND {self.related_pivot_key} = ?"
+            cursor.execute(sql, (parent_val, related_id))
+        conn.commit()
+
+        self._clear_cache()
+
+    def sync(self, ids: List[Union[int, 'Model']]) -> None:
+        target_ids = [item.id if isinstance(item, Model) else item for item in ids]
+        current_results = self.get_results()
+        current_ids = [item._attributes.get(self.related_key) for item in current_results]
+
+        to_attach = [i for i in target_ids if i not in current_ids]
+        to_detach = [i for i in current_ids if i not in target_ids]
+
+        for rid in to_attach:
+            self.attach(rid)
+        for rid in to_detach:
+            self.detach(rid)
+
+        self._clear_cache()
 
 
 class _RelationList(list):
@@ -136,6 +236,19 @@ class _RelationList(list):
 
     def __call__(self) -> Relation:
         return self._relation_factory()
+
+    def __getattr__(self, name: str) -> Any:
+        """
+        Proxy method agar jika method pivot seperti attach, detach, atau sync
+        dipanggil langsung pada hasil relasi (misal: user.roles.attach(...)),
+        method tersebut diteruskan ke objek relation aslinya.
+        """
+        rel_obj = self._relation_factory()
+        if hasattr(rel_obj, name):
+            attr = getattr(rel_obj, name)
+            if callable(attr):
+                return attr
+        raise AttributeError(f"'_RelationList' atau relasi terkait tidak memiliki atribut atau metode '{name}'.")
 
 
 class relation:
@@ -163,6 +276,67 @@ class relation:
             cached.__dict__["_relation_factory"] = lambda: self.func(instance)
 
         return cached
+
+# Tambahan class Collection di eloquent_base.py
+
+class Collection(list):
+    """
+    Pembungkus list kustom bergaya Laravel Collection untuk memanipulasi
+    hasil query model di memori secara ekspresif dan Pythonic.
+    """
+    def __init__(self, iterable=None):
+        super().__init__(iterable if iterable is not None else [])
+
+    def where(self, key: str, value: Any) -> 'Collection':
+        """Memfilter item di dalam collection berdasarkan nilai atribut."""
+        filtered = [
+            item for item in self
+            if getattr(item, key, None) == value
+        ]
+        return Collection(filtered)
+
+    def filter(self, callback: Callable[[Any], bool]) -> 'Collection':
+        """Memfilter item menggunakan fungsi lambda/callback kustom."""
+        filtered = [item for item in self if callback(item)]
+        return Collection(filtered)
+
+    def map(self, callback: Callable[[Any], Any]) -> 'Collection':
+        """Mentransformasi setiap item di dalam collection."""
+        mapped = [callback(item) for item in self]
+        return Collection(mapped)
+
+    def group_by(self, key: str) -> Dict[Any, 'Collection']:
+        """Mengelompokkan item berdasarkan kunci/atribut tertentu."""
+        grouped: Dict[Any, List[Any]] = {}
+        for item in self:
+            val = getattr(item, key, None)
+            if val not in grouped:
+                grouped[val] = []
+            grouped[val].append(item)
+        return {k: Collection(v) for k, v in grouped.items()}
+
+    def groupBy(self, key: str) -> Dict[Any, 'Collection']:
+        return self.group_by(key)
+
+    def pluck(self, key: str) -> 'Collection':
+        """Mengambil daftar nilai dari satu atribut tertentu saja."""
+        plucked = [getattr(item, key, None) for item in self]
+        return Collection(plucked)
+
+    def first(self) -> Any:
+        """Mengambil item pertama dari collection, atau None jika kosong."""
+        return self[0] if self else None
+
+    def last(self) -> Any:
+        """Mengambil item terakhir dari collection, atau None jika kosong."""
+        return self[-1] if self else None
+
+    def to_dict(self) -> List[dict]:
+        """Mengubah seluruh model di dalam collection menjadi list of dictionary."""
+        return [item.to_dict() if hasattr(item, "to_dict") else item for item in self]
+
+    def __repr__(self) -> str:
+        return f"Collection({super().__repr__()})"
 
 
 # =====================================================================
@@ -359,7 +533,7 @@ class QueryBuilder:
                 )
             rel_obj.match_eager(models, rel_name, nested=nested_list)
 
-    def get(self) -> List['Model']:
+    def get(self) -> Collection:
         sql, bindings = self.to_sql()
         conn = DatabaseManager.get_connection(self.model_cls.connection_name)
         cursor = conn.cursor()
@@ -371,7 +545,8 @@ class QueryBuilder:
         if self._eager_load and models:
             self._eager_load_relations(models)
 
-        return models
+        # Bungkus hasil list model ke dalam Collection berfitur tinggi
+        return Collection(models)
 
     def first(self) -> Optional['Model']:
         self.limit(1)
@@ -530,11 +705,14 @@ class QueryBuilder:
 
 class ModelMeta(type):
     def __getattr__(cls, name: str):
+        # Hindari pencegatan pada atribut internal Python / dunder
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(f"Model '{cls.__name__}' tidak memiliki atribut '{name}'.")
+
         builder = cls.query()
         if hasattr(builder, name):
             return getattr(builder, name)
         raise AttributeError(f"Model '{cls.__name__}' tidak memiliki atribut, metode, atau scope '{name}'.")
-
 
 class Model(metaclass=ModelMeta):
     connection_name: str = "default"
@@ -750,6 +928,43 @@ class Model(metaclass=ModelMeta):
         owner_key: Optional[str] = None
     ) -> BelongsTo:
         return self.belongs_to(related_cls, foreign_key, owner_key)
+
+    def belongs_to_many(
+            self,
+            related_cls: Union[Type['Model'], str],
+            pivot_table: Optional[str] = None,
+            foreign_pivot_key: Optional[str] = None,
+            related_pivot_key: Optional[str] = None,
+            parent_key: Optional[str] = None,
+            related_key: Optional[str] = None
+    ) -> BelongsToMany:
+        if isinstance(related_cls, str):
+            related_cls = globals()[related_cls]
+
+        # Konvensi penamaan tabel pivot ala Laravel (alfabetis, misal: role_user)
+        base_name = self.__class__.__name__.lower()
+        rel_name = related_cls.__name__.lower()
+        default_pivot = "_".join(sorted([base_name + "s", rel_name + "s"]))  # sederhana
+
+        p_table = pivot_table or f"{base_name}_{rel_name}"
+        fp_key = foreign_pivot_key or f"{base_name}_id"
+        rp_key = related_pivot_key or f"{rel_name}_id"
+        p_key = parent_key or self.primary_key
+        r_key = related_key or related_cls.primary_key
+
+        return BelongsToMany(related_cls, self, p_table, fp_key, rp_key, p_key, r_key)
+
+    def belongsToMany(
+            self,
+            related_cls: Union[Type['Model'], str],
+            pivot_table: Optional[str] = None,
+            foreign_pivot_key: Optional[str] = None,
+            related_pivot_key: Optional[str] = None,
+            parent_key: Optional[str] = None,
+            related_key: Optional[str] = None
+    ) -> BelongsToMany:
+        return self.belongs_to_many(related_cls, pivot_table, foreign_pivot_key, related_pivot_key, parent_key,
+                                    related_key)
 
     def _resolve_relation_object(self, name: str) -> Optional[Relation]:
         cls_attr = getattr(self.__class__, name, None)
