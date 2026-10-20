@@ -23,3 +23,7 @@ class Product(Model):
     fillable = ['category_id', 'name', 'price']
     timestamps = True
     soft_deletes = True
+
+    @relation
+    def category(self):
+        return self.belongs_to(Category, foreign_key="category_id")

@@ -95,11 +95,18 @@ class ORMGenerator:
 
                 # Deteksi Foreign Key (misal: category_id merujuk ke tabel categories)
                 if col_name.endswith("_id") and col_name != primary_key:
-                    prefix = col_name[:-3]
-                    # Cari tabel yang cocok (bisa 'categories' atau berakhiran 's')
+                    prefix = col_name[:-3]  # contoh: 'category' dari 'category_id'
                     ref_table = None
+
                     for t in tables:
-                        if t == prefix + "s" or t == prefix + "ies" or t[:-1] == prefix:
+                        # Buat bentuk dasar (singular) dari nama tabel untuk dicocokkan dengan prefix
+                        singular_t = t
+                        if t.endswith("ies"):
+                            singular_t = t[:-3] + "y"  # categories -> category
+                        elif t.endswith("s") and not t.endswith("ss"):
+                            singular_t = t[:-1]  # posts -> post
+
+                        if t == prefix or singular_t == prefix or prefix == singular_t:
                             ref_table = t
                             break
 
