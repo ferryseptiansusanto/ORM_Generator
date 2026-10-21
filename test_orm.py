@@ -87,3 +87,35 @@ def search_transactions(keyword_plat: str, tanggal_mulai: str, tanggal_selesai: 
     result = query.order_by("created_at", "DESC").paginate(per_page=15, page=page)
 
     return result
+
+
+from database_manager import DB
+from models import User, Post, Role
+
+# =========================================================
+# GAYA 1: Otomatis dengan Context Manager (Rekomendasi)
+# =========================================================
+try:
+    with DB.transaction():
+        # 1. Buat user baru
+        user = User.create(username="ferry_dev", email="ferry@example.com")
+
+        # 2. Buat post milik user
+        Post.create(user_id=user.id, title="Transaksi Pertama", body="Isi artikel")
+
+        # 3. Simulasi error di tengah jalan (misal gagal validasi bisnis)
+        raise RuntimeError("Koneksi payment gateway terputus!")
+
+except RuntimeError as err:
+    print(f"Transaksi dibatalkan: {err}")
+    # Data 'ferry_dev' dan 'Transaksi Pertama' TIDAK AKAN tersimpan di database (Otomatis Rollback!)
+
+# =========================================================
+# GAYA 2: Manual (begin_transaction, commit, rollback)
+# =========================================================
+DB.begin_transaction()
+try:
+    tx = Transaction.create(ticket_code="TCK-001", plate_number="B 1234 XYZ", net_weight=1500.5)
+    DB.commit()
+except Exception:
+    DB.rollback()

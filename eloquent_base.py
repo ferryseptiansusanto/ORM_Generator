@@ -267,7 +267,7 @@ class BelongsToMany(Relation):
                 )
                 cursor.execute(insert_sql, (parent_val, related_id))
 
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.parent.connection_name)
         self._clear_cache()
 
     def detach(self, id_or_model: Optional[Union[int, 'Model', List[Union[int, 'Model']]]] = None) -> None:
@@ -290,7 +290,7 @@ class BelongsToMany(Relation):
                     f"WHERE {self.foreign_pivot_key} = ? AND {self.related_pivot_key} = ?"
                 )
                 cursor.execute(sql, (parent_val, related_id))
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.parent.connection_name)
         self._clear_cache()
 
     def sync(self, ids: List[Union[int, 'Model']]) -> None:
@@ -758,7 +758,7 @@ class QueryBuilder:
         conn = DatabaseManager.get_connection(self.model_cls.connection_name)
         cursor = conn.cursor()
         cursor.execute(sql, bindings)
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.model_cls.connection_name)
         return cursor.rowcount
 
     def delete(self) -> int:
@@ -790,7 +790,7 @@ class QueryBuilder:
                 sql += f" {where_sql}"
             cursor.execute(sql, where_bindings)
 
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.model_cls.connection_name)
         return cursor.rowcount
 
     def force_delete(self) -> int:
@@ -807,7 +807,7 @@ class QueryBuilder:
         conn = DatabaseManager.get_connection(self.model_cls.connection_name)
         cursor = conn.cursor()
         cursor.execute(sql, where_bindings)
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.model_cls.connection_name)
         return cursor.rowcount
 
     def forceDelete(self) -> int:
@@ -843,7 +843,7 @@ class QueryBuilder:
         conn = DatabaseManager.get_connection(self.model_cls.connection_name)
         cursor = conn.cursor()
         cursor.execute(sql, bindings)
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.model_cls.connection_name)
         return cursor.rowcount
 
     def paginate(self, per_page: int = 15, page: int = 1) -> Dict[str, Any]:
@@ -1309,7 +1309,7 @@ class Model(metaclass=ModelMeta):
 
             sql = f"INSERT INTO {table} ({col_names}) VALUES ({placeholders})"
             cursor.execute(sql, values)
-            conn.commit()
+            DatabaseManager.commit_if_auto(self.connection_name)
 
             if pk not in self._attributes and cursor.lastrowid:
                 self._attributes[pk] = cursor.lastrowid
@@ -1341,7 +1341,7 @@ class Model(metaclass=ModelMeta):
 
             sql = f"UPDATE {table} SET {set_clause} WHERE {pk} = ?"
             cursor.execute(sql, values)
-            conn.commit()
+            DatabaseManager.commit_if_auto(self.connection_name)
 
             self.sync_original()
 
@@ -1391,13 +1391,13 @@ class Model(metaclass=ModelMeta):
             params.append(pk_val)
             sql = f"UPDATE {table} SET {', '.join(set_cols)} WHERE {pk} = ?"
             cursor.execute(sql, tuple(params))
-            conn.commit()
+            DatabaseManager.commit_if_auto(self.connection_name)
 
             self.sync_original()
         else:
             sql = f"DELETE FROM {table} WHERE {pk} = ?"
             cursor.execute(sql, (pk_val,))
-            conn.commit()
+            DatabaseManager.commit_if_auto(self.connection_name)
             self.__dict__["_exists"] = False
 
         self._fire_event("after_delete")
@@ -1423,7 +1423,7 @@ class Model(metaclass=ModelMeta):
 
         sql = f"DELETE FROM {table} WHERE {pk} = ?"
         cursor.execute(sql, (pk_val,))
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.connection_name)
 
         self.__dict__["_exists"] = False
         self._fire_event("after_delete")
@@ -1460,7 +1460,7 @@ class Model(metaclass=ModelMeta):
         params.append(pk_val)
         sql = f"UPDATE {table} SET {', '.join(set_cols)} WHERE {pk} = ?"
         cursor.execute(sql, tuple(params))
-        conn.commit()
+        DatabaseManager.commit_if_auto(self.connection_name)
 
         self.sync_original()
 
