@@ -44,7 +44,6 @@ class Relation:
             return attr
         raise AttributeError(f"Relation '{self.__class__.__name__}' tidak memiliki metode '{name}'.")
 
-
 class HasMany(Relation):
     def _add_constraints(self) -> None:
         if self.parent._exists:
@@ -307,53 +306,6 @@ class MorphTo:
 
         return target_cls.find(target_id)
 
-class _RelationList(list):
-    def __init__(self, iterable, relation_factory: Callable[[], Relation]):
-        super().__init__(iterable)
-        self._relation_factory = relation_factory
-
-    def __call__(self) -> Relation:
-        return self._relation_factory()
-
-    def __getattr__(self, name: str) -> Any:
-        """
-        Proxy method agar jika method pivot seperti attach, detach, atau sync
-        dipanggil langsung pada hasil relasi (misal: user.roles.attach(...)),
-        method tersebut diteruskan ke objek relation aslinya.
-        """
-        rel_obj = self._relation_factory()
-        if hasattr(rel_obj, name):
-            attr = getattr(rel_obj, name)
-            if callable(attr):
-                return attr
-        raise AttributeError(f"'_RelationList' atau relasi terkait tidak memiliki atribut atau metode '{name}'.")
-
-
-class relation:
-    def __init__(self, func: Callable[['Model'], Relation]):
-        self.func = func
-        self.name = func.__name__
-
-    def __call__(self, instance: 'Model') -> Relation:
-        return self.func(instance)
-
-    def __get__(self, instance: Optional['Model'], owner: Type['Model']) -> Any:
-        if instance is None:
-            return self
-
-        if self.name not in instance._relations:
-            rel_obj = self.func(instance)
-            instance._relations[self.name] = rel_obj.get_results()
-
-        cached = instance._relations[self.name]
-
-        if isinstance(cached, list):
-            return _RelationList(cached, lambda: self.func(instance))
-
-        if isinstance(cached, Model):
-            cached.__dict__["_relation_factory"] = lambda: self.func(instance)
-
-        return cached
 
 # Tambahan class Collection di eloquent_base.py
 
@@ -415,6 +367,56 @@ class Collection(list):
 
     def __repr__(self) -> str:
         return f"Collection({super().__repr__()})"
+
+
+
+class _RelationList(list):
+    def __init__(self, iterable, relation_factory: Callable[[], Relation]):
+        super().__init__(iterable)
+        self._relation_factory = relation_factory
+
+    def __call__(self) -> Relation:
+        return self._relation_factory()
+
+    def __getattr__(self, name: str) -> Any:
+        """
+        Proxy method agar jika method pivot seperti attach, detach, atau sync
+        dipanggil langsung pada hasil relasi (misal: user.roles.attach(...)),
+        method tersebut diteruskan ke objek relation aslinya.
+        """
+        rel_obj = self._relation_factory()
+        if hasattr(rel_obj, name):
+            attr = getattr(rel_obj, name)
+            if callable(attr):
+                return attr
+        raise AttributeError(f"'_RelationList' atau relasi terkait tidak memiliki atribut atau metode '{name}'.")
+
+
+class relation:
+    def __init__(self, func: Callable[['Model'], Relation]):
+        self.func = func
+        self.name = func.__name__
+
+    def __call__(self, instance: 'Model') -> Relation:
+        return self.func(instance)
+
+    def __get__(self, instance: Optional['Model'], owner: Type['Model']) -> Any:
+        if instance is None:
+            return self
+
+        if self.name not in instance._relations:
+            rel_obj = self.func(instance)
+            instance._relations[self.name] = rel_obj.get_results()
+
+        cached = instance._relations[self.name]
+
+        if isinstance(cached, list):
+            return _RelationList(cached, lambda: self.func(instance))
+
+        if isinstance(cached, Model):
+            cached.__dict__["_relation_factory"] = lambda: self.func(instance)
+
+        return cached
 
 
 # =====================================================================
@@ -626,6 +628,10 @@ class QueryBuilder:
         # Bungkus hasil list model ke dalam Collection berfitur tinggi
         return Collection(models)
 
+    def pluck(self, column: str) -> Collection:
+        """Mengambil Collection berisi nilai dari satu kolom langsung via QueryBuilder."""
+        return self.get().pluck(column)
+
     def first(self) -> Optional['Model']:
         self.limit(1)
         results = self.get()
@@ -763,6 +769,49 @@ class QueryBuilder:
         cursor.execute(sql, bindings)
         conn.commit()
         return cursor.rowcount
+
+    def paginate(self, per_page: int = 15, page: int = 1) -> Dict[str, Any]:
+        """
+        Membagi hasil query menjadi halaman-halaman (pagination).
+        Mengembalikan dictionary berisi data list/collection dan metadata halaman.
+        """
+        # 1. Hitung total data keseluruhan (tanpa limit/offset)
+        total = self.count()
+
+        # 2. Hitung total halaman
+        import math
+        last_page = math.ceil(total / per_page) if total > 0 else 1
+
+        # Validasi agar page tidak keluar batas
+        page = max(1, min(page, last_page))
+        offset_val = (page - 1) * per_page
+
+        # 3. Terapkan limit dan offset, lalu ambil data
+        self.limit(per_page).offset(offset_val)
+        items = self.get()
+
+        # 4. Kembalikan struktur data ala Laravel LengthAwarePaginator
+        return {
+            "data": items,
+            "current_page": page,
+            "per_page": per_page,
+            "total": total,
+            "last_page": last_page,
+            "from": offset_val + 1 if total > 0 else 0,
+            "to": min(offset_val + per_page, total)
+        }
+
+    def search(self, column: str, keyword: str) -> 'QueryBuilder':
+        """Helper untuk pencarian parsial (LIKE %keyword%)."""
+        if keyword:
+            return self.where(column, "LIKE", f"%{keyword}%")
+        return self
+
+    def where_date_between(self, column: str, start_date: str, end_date: str) -> 'QueryBuilder':
+        """Helper untuk memfilter rentang tanggal."""
+        if start_date and end_date:
+            return self.where(column, ">=", start_date).where(column, "<=", end_date)
+        return self
 
     def __getattr__(self, name: str) -> Callable:
         scope_callable = self.model_cls._resolve_scope(name)
@@ -1133,7 +1182,7 @@ class Model(metaclass=ModelMeta):
         if callable(hook):
             result = hook()
             if result is False:
-                return
+                return False
 
         # 2. Eksekusi Hook dari Observers Eksternal yang terdaftar
         model_name = self.__class__.__name__
