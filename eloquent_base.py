@@ -149,8 +149,10 @@ class BelongsToMany(Relation):
 
     def _clear_cache(self) -> None:
         """Membersihkan cache relasi pada parent agar data ditarik ulang dari DB."""
-        for rel_name, rel_obj in list(self.parent._relations.items()):
-            if rel_obj is self or (hasattr(rel_obj, "_relation_factory") and rel_obj._relation_factory() is self):
+        for rel_name in list(self.parent._relations.keys()):
+            rel_instance = self.parent._resolve_relation_object(rel_name)
+            # Jika relasi pada key tersebut merujuk ke tabel pivot dan model yang sama, hapus cachenya!
+            if isinstance(rel_instance, BelongsToMany) and rel_instance.pivot_table == self.pivot_table:
                 del self.parent._relations[rel_name]
 
     def _add_constraints(self) -> None:
@@ -228,6 +230,82 @@ class BelongsToMany(Relation):
 
         self._clear_cache()
 
+
+class MorphMany(Relation):
+    def __init__(self, related_cls: Type['Model'], parent: 'Model', morph_name: str):
+        self.morph_name = morph_name
+        self.foreign_id = f"{morph_name}_id"
+        self.foreign_type = f"{morph_name}_type"
+        super().__init__(related_cls, parent, self.foreign_id, parent.primary_key)
+
+    def _add_constraints(self) -> None:
+        if self.parent._exists:
+            local_val = self.parent._attributes.get(self.local_key)
+            parent_type = self.parent.__class__.__name__
+            self.query.where(self.foreign_id, local_val).where(self.foreign_type, parent_type)
+
+    def get_results(self) -> List['Model']:
+        if not self.parent._exists:
+            return []
+        self._add_constraints()
+        return self.query.get()
+
+    def match_eager(self, models: List['Model'], relation_name: str, nested: List[str] = None) -> None:
+        # Implementasi sederhana Eager Loading MorphMany
+        if not models:
+            return
+
+        keys = list(
+            {m._attributes.get(self.local_key) for m in models if m._attributes.get(self.local_key) is not None})
+        parent_type = models[0].__class__.__name__
+
+        if not keys:
+            for m in models:
+                m._relations[relation_name] = []
+            return
+
+        builder = self.related_cls.query().where_in(self.foreign_id, keys).where(self.foreign_type, parent_type)
+        if nested:
+            builder.with_relations(*nested)
+        related_models = builder.get()
+
+        grouped: Dict[Any, List['Model']] = {k: [] for k in keys}
+        for rel_model in related_models:
+            fk_val = rel_model._attributes.get(self.foreign_id)
+            if fk_val in grouped:
+                grouped[fk_val].append(rel_model)
+
+        for m in models:
+            lk_val = m._attributes.get(self.local_key)
+            m._relations[relation_name] = grouped.get(lk_val, [])
+
+
+class MorphTo:
+    """
+    MorphTo tidak mewarisi class Relation karena target modelnya
+    berubah-ubah secara dinamis per baris data.
+    """
+
+    def __init__(self, child: 'Model', morph_name: str):
+        self.child = child
+        self.morph_name = morph_name
+        self.foreign_id = f"{morph_name}_id"
+        self.foreign_type = f"{morph_name}_type"
+
+    def get_results(self) -> Optional['Model']:
+        target_type = self.child._attributes.get(self.foreign_type)
+        target_id = self.child._attributes.get(self.foreign_id)
+
+        if not target_type or not target_id:
+            return None
+
+        # Mencari referensi class secara dinamis dari subclass Model yang terdaftar
+        target_cls = next((cls for cls in Model.__subclasses__() if cls.__name__ == target_type), None)
+
+        if not target_cls:
+            raise ValueError(f"Target polymorphic class '{target_type}' tidak ditemukan.")
+
+        return target_cls.find(target_id)
 
 class _RelationList(list):
     def __init__(self, iterable, relation_factory: Callable[[], Relation]):
@@ -731,6 +809,9 @@ class Model(metaclass=ModelMeta):
     updated_at_column: str = "updated_at"
     timestamp_format: str = "%Y-%m-%d %H:%M:%S"
 
+    #Registri global untuk mencatat Observer
+    _observers_registry: Dict[str, List[Any]] = {}
+
     _RESERVED_CLASS_ATTRS = {
         "connection_name", "table", "primary_key", "fillable", "guarded", "appends",
         "soft_deletes", "deleted_at_column", "timestamps",
@@ -909,6 +990,26 @@ class Model(metaclass=ModelMeta):
     ) -> HasMany:
         return self.has_many(related_cls, foreign_key, local_key)
 
+    def morph_many(
+            self,
+            related_cls: Union[Type['Model'], str],
+            morph_name: str
+    ) -> MorphMany:
+        if isinstance(related_cls, str):
+            # Resolve string ke class aslinya
+            related_cls = next(cls for cls in Model.__subclasses__() if cls.__name__ == related_cls)
+        return MorphMany(related_cls, self, morph_name)
+
+    def morphMany(self, related_cls: Union[Type['Model'], str], morph_name: str) -> MorphMany:
+        return self.morph_many(related_cls, morph_name)
+
+    def morph_to(self, morph_name: str) -> MorphTo:
+        return MorphTo(self, morph_name)
+
+    def morphTo(self, morph_name: str) -> MorphTo:
+        return self.morph_to(morph_name)
+
+
     def belongs_to(
             self,
             related_cls: Union[Type['Model'], str],
@@ -1026,11 +1127,25 @@ class Model(metaclass=ModelMeta):
         return self
 
     def _fire_event(self, event_name: str) -> bool:
+        """Memicu event hook internal model dan Observer eksternal."""
+        # 1. Eksekusi Hook dari dalam Model (Internal)
         hook = getattr(self, event_name, None)
         if callable(hook):
             result = hook()
             if result is False:
-                return False
+                return
+
+        # 2. Eksekusi Hook dari Observers Eksternal yang terdaftar
+        model_name = self.__class__.__name__
+        observers = self._observers_registry.get(model_name, [])
+
+        for observer in observers:
+            obs_hook = getattr(observer, event_name, None)
+            if callable(obs_hook):
+                # Suntikkan instance model ini (self) ke dalam observer
+                result = obs_hook(self)
+                if result is False:
+                    return False
         return True
 
     @classmethod
@@ -1314,3 +1429,12 @@ class Model(metaclass=ModelMeta):
             rels = ", ".join(f"{k}={v!r}" for k, v in self._relations.items())
             attrs = f"{attrs}, relations={{{rels}}}" if attrs else f"relations={{{rels}}}"
         return f"<{self.__class__.__name__}({attrs})>"
+
+    @classmethod
+    def observe(cls, observer_cls: Type) -> None:
+        """Mendaftarkan class Observer ke Model ini."""
+        model_name = cls.__name__
+        if model_name not in Model._observers_registry:
+            Model._observers_registry[model_name] = []
+        # Simpan instance dari observer
+        Model._observers_registry[model_name].append(observer_cls())

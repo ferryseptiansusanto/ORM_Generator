@@ -1,88 +1,108 @@
-# demo_pivot.py
+# demo_advanced.py
 from database_manager import DatabaseManager
 from eloquent_base import Model, relation
 
 
-# 1. Definisi Model dengan Relasi Many-to-Many
+# ==========================================
+# 1. SETUP MODEL & OBSERVER
+# ==========================================
+
+class UserObserver:
+    def before_create(self, user: 'User'):
+        print(f"[Observer] Membuat slug otomatis untuk {user.name}...")
+        user.slug = user.name.lower().replace(" ", "-")
+
+    def before_delete(self, user: 'User'):
+        if user.name.lower() == "admin":
+            print("[Observer] GAGAL: Akun Admin tidak boleh dihapus!")
+            return False
+
+
 class User(Model):
     table = "users"
-    fillable = ["name"]
+    fillable = ["name", "slug"]
+
+
+# Daftarkan Observer ke Model User
+User.observe(UserObserver)
+
+
+class Comment(Model):
+    table = "comments"
+    fillable = ["body", "commentable_id", "commentable_type"]
 
     @relation
-    def roles(self):
-        return self.belongs_to_many(
-            Role,
-            pivot_table="role_user",
-            foreign_pivot_key="user_id",
-            related_pivot_key="role_id"
-        )
+    def commentable(self):
+        # Relasi MorphTo (Bisa dimiliki oleh Post atau Video)
+        return self.morph_to(morph_name="commentable")
 
 
-class Role(Model):
-    table = "roles"
-    fillable = ["name"]
+class Post(Model):
+    table = "posts"
+    fillable = ["title"]
 
     @relation
-    def users(self):
-        return self.belongs_to_many(
-            User,
-            pivot_table="role_user",
-            foreign_pivot_key="role_id",
-            related_pivot_key="user_id"
-        )
+    def comments(self):
+        # Relasi MorphMany untuk komentar
+        return self.morph_many(Comment, morph_name="commentable")
 
 
-# 2. Setup Database & Bersihkan Tabel Lama (Mencegah Error Table Already Exists)
+class Video(Model):
+    table = "videos"
+    fillable = ["title"]
+
+    @relation
+    def comments(self):
+        # Relasi MorphMany untuk komentar
+        return self.morph_many(Comment, morph_name="commentable")
+
+
+# ==========================================
+# 2. SETUP DATABASE SQLITE IN-MEMORY
+# ==========================================
 conn = DatabaseManager.get_connection("default")
 conn.executescript("""
-    DROP TABLE IF EXISTS role_user;
-    DROP TABLE IF EXISTS users;
-    DROP TABLE IF EXISTS roles;
+    DROP TABLE IF EXISTS users; 
+    DROP TABLE IF EXISTS posts;
+    DROP TABLE IF EXISTS videos;
+    DROP TABLE IF EXISTS comments;
 
-    CREATE TABLE users (
+    CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, slug TEXT);
+    CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT);
+    CREATE TABLE videos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT);
+    CREATE TABLE comments (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        name TEXT
-    );
-
-    CREATE TABLE roles (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        name TEXT
-    );
-
-    CREATE TABLE role_user (
-        user_id INTEGER,
-        role_id INTEGER,
-        PRIMARY KEY (user_id, role_id)
+        body TEXT, 
+        commentable_id INTEGER, 
+        commentable_type TEXT
     );
 """)
 conn.commit()
 
-print("=== 1. TEST SEED DATA & .attach() ===")
-# Buat data dummy
-user = User.create(name="Budi Santoso")
-admin_role = Role.create(name="Admin")
-editor_role = Role.create(name="Editor")
-viewer_role = Role.create(name="Viewer")
+# ==========================================
+# 3. PENGUJIAN
+# ==========================================
+print("=== 1. TEST OBSERVER ===")
+admin = User.create(name="Admin")
+budi = User.create(name="Budi Santoso")
+print(f"Hasil Slug Budi: {budi.slug}")
+print(f"Hapus Admin Berhasil? {admin.delete()}")
 
-# Menggunakan .attach() dengan objek Model dan ID langsung
-user.roles.attach(admin_role)
-user.roles.attach(editor_role.id)
+print("\n=== 2. TEST POLYMORPHIC RELATIONS ===")
+post1 = Post.create(title="Belajar Python ORM")
+video1 = Video.create(title="Tutorial YouTube ORM")
 
-print(f"Role milik {user.name} setelah attach (Admin & Editor):", [r.name for r in user.roles])
+# Menambahkan komentar ke Post
+Comment.create(body="Komentar pertama pada Post", commentable_id=post1.id, commentable_type="Post")
+# Menambahkan komentar ke Video
+Comment.create(body="Videonya sangat bermanfaat!", commentable_id=video1.id, commentable_type="Video")
 
-print("\n=== 2. TEST .detach() ===")
-# Menghapus relasi tertentu dari tabel pivot
-user.roles.detach(admin_role)
-print(f"Role milik {user.name} setelah detach Admin:", [r.name for r in user.roles])
+print(f"Komentar di Post '{post1.title}': {[c.body for c in post1.comments]}")
+print(f"Komentar di Video '{video1.title}': {[c.body for c in video1.comments]}")
 
-print("\n=== 3. TEST .sync() ===")
-# Menyelaraskan relasi: Hanya menyisakan Viewer & Editor, menghapus yang lain
-user.roles.sync([editor_role.id, viewer_role.id])
-print(f"Role milik {user.name} setelah sync ([Editor, Viewer]):", [r.name for r in user.roles])
+print("\n=== 3. TEST MORPH_TO (REVERSE) ===")
+komen1 = Comment.find(1)
+print(f"Induk dari Komentar 1: {komen1.commentable.__class__.__name__} -> {komen1.commentable.title}")
 
-
-# Memaksa query baru langsung ke database (bypass cache memori)
-print(f"Role milik {user.name} setelah attach:", [r.name for r in user.roles().get()])
-
-user = User.create(name="Budi Santoso")
-print(f"DEBUG: ID User yang baru dibuat = {user.id}") # Pastikan ini tidak None!
+komen2 = Comment.find(2)
+print(f"Induk dari Komentar 2: {komen2.commentable.__class__.__name__} -> {komen2.commentable.title}")
