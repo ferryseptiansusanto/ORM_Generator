@@ -146,6 +146,15 @@ class BelongsToMany(Relation):
         self.related_key = related_key
         super().__init__(related_cls, parent, foreign_pivot_key, parent_key)
 
+    @staticmethod
+    def _extract_row_val(row: Any, key: str, idx: int = 0) -> Any:
+        if isinstance(row, dict):
+            return row[key]
+        try:
+            return row[key]
+        except (KeyError, TypeError, IndexError):
+            return row[idx]
+
     def _clear_cache(self) -> None:
         """Membersihkan cache relasi pada parent agar data ditarik ulang dari DB."""
         for rel_name in list(self.parent._relations.keys()):
@@ -166,36 +175,102 @@ class BelongsToMany(Relation):
             cursor = conn.cursor()
             pivot_sql = f"SELECT {self.related_pivot_key} FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ?"
             cursor.execute(pivot_sql, (parent_val,))
-            related_ids = [row[0] for row in cursor.fetchall()]
+            related_ids = [
+                self._extract_row_val(row, self.related_pivot_key, 0)
+                for row in cursor.fetchall()
+            ]
 
             if related_ids:
                 self.query.where_in(pk, related_ids)
             else:
                 self.query.where(pk, "=", -1)
 
-    def get_results(self) -> List['Model']:
+    def get_results(self) -> 'Collection':
         if not self.parent._exists:
-            return []
+            return Collection([])
         self._add_constraints()
         return self.query.get()
 
-    def attach(self, id_or_model: Union[int, 'Model']) -> None:
+    def match_eager(self, models: List['Model'], relation_name: str, nested: List[str] = None) -> None:
+        """Mendukung Eager Loading (.with_('roles')) pada relasi Many-to-Many."""
+        parent_keys = list({
+            m._attributes.get(self.parent_key)
+            for m in models
+            if m._attributes.get(self.parent_key) is not None
+        })
+        if not parent_keys:
+            for m in models:
+                m._relations[relation_name] = Collection([])
+            return
+
+        conn = DatabaseManager.get_connection(self.parent.connection_name)
+        cursor = conn.cursor()
+        placeholders = ", ".join(["?"] * len(parent_keys))
+        pivot_sql = (
+            f"SELECT {self.foreign_pivot_key}, {self.related_pivot_key} "
+            f"FROM {self.pivot_table} WHERE {self.foreign_pivot_key} IN ({placeholders})"
+        )
+        cursor.execute(pivot_sql, parent_keys)
+        pivot_rows = cursor.fetchall()
+
+        if not pivot_rows:
+            for m in models:
+                m._relations[relation_name] = Collection([])
+            return
+
+        related_ids = list({
+            self._extract_row_val(r, self.related_pivot_key, 1)
+            for r in pivot_rows
+        })
+
+        builder = self.related_cls.query().where_in(self.related_key, related_ids)
+        if nested:
+            builder.with_relations(*nested)
+        related_models = builder.get()
+
+        related_map: Dict[Any, 'Model'] = {
+            rm._attributes.get(self.related_key): rm for rm in related_models
+        }
+
+        grouped: Dict[Any, List['Model']] = {k: [] for k in parent_keys}
+        for r in pivot_rows:
+            fk_val = self._extract_row_val(r, self.foreign_pivot_key, 0)
+            rk_val = self._extract_row_val(r, self.related_pivot_key, 1)
+            if fk_val in grouped and rk_val in related_map:
+                grouped[fk_val].append(related_map[rk_val])
+
+        for m in models:
+            pk_val = m._attributes.get(self.parent_key)
+            m._relations[relation_name] = Collection(grouped.get(pk_val, []))
+
+    def attach(self, id_or_model: Union[int, 'Model', List[Union[int, 'Model']]]) -> None:
         if not self.parent._exists:
             raise ValueError("Tidak dapat melakukan attach pada model yang belum disimpan ke database.")
 
-        related_id = id_or_model.id if isinstance(id_or_model, Model) else id_or_model
+        items = id_or_model if isinstance(id_or_model, (list, tuple, set)) else [id_or_model]
         parent_val = self.parent._attributes.get(self.parent_key)
 
         conn = DatabaseManager.get_connection(self.parent.connection_name)
         cursor = conn.cursor()
-        sql = f"INSERT OR IGNORE INTO {self.pivot_table} ({self.foreign_pivot_key}, {self.related_pivot_key}) VALUES (?, ?)"
-        cursor.execute(sql, (parent_val, related_id))
-        conn.commit()
 
-        # Bersihkan cache agar data ter-refresh secara otomatis
+        for item in items:
+            related_id = item._attributes.get(self.related_key, item.id) if isinstance(item, Model) else item
+            check_sql = (
+                f"SELECT 1 FROM {self.pivot_table} "
+                f"WHERE {self.foreign_pivot_key} = ? AND {self.related_pivot_key} = ?"
+            )
+            cursor.execute(check_sql, (parent_val, related_id))
+            if not cursor.fetchone():
+                insert_sql = (
+                    f"INSERT INTO {self.pivot_table} ({self.foreign_pivot_key}, {self.related_pivot_key}) "
+                    f"VALUES (?, ?)"
+                )
+                cursor.execute(insert_sql, (parent_val, related_id))
+
+        conn.commit()
         self._clear_cache()
 
-    def detach(self, id_or_model: Optional[Union[int, 'Model']] = None) -> None:
+    def detach(self, id_or_model: Optional[Union[int, 'Model', List[Union[int, 'Model']]]] = None) -> None:
         if not self.parent._exists:
             return
 
@@ -207,25 +282,32 @@ class BelongsToMany(Relation):
             sql = f"DELETE FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ?"
             cursor.execute(sql, (parent_val,))
         else:
-            related_id = id_or_model.id if isinstance(id_or_model, Model) else id_or_model
-            sql = f"DELETE FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ? AND {self.related_pivot_key} = ?"
-            cursor.execute(sql, (parent_val, related_id))
+            items = id_or_model if isinstance(id_or_model, (list, tuple, set)) else [id_or_model]
+            for item in items:
+                related_id = item._attributes.get(self.related_key, item.id) if isinstance(item, Model) else item
+                sql = (
+                    f"DELETE FROM {self.pivot_table} "
+                    f"WHERE {self.foreign_pivot_key} = ? AND {self.related_pivot_key} = ?"
+                )
+                cursor.execute(sql, (parent_val, related_id))
         conn.commit()
-
         self._clear_cache()
 
     def sync(self, ids: List[Union[int, 'Model']]) -> None:
-        target_ids = [item.id if isinstance(item, Model) else item for item in ids]
+        target_ids = [
+            (item._attributes.get(self.related_key, item.id) if isinstance(item, Model) else item)
+            for item in ids
+        ]
         current_results = self.get_results()
         current_ids = [item._attributes.get(self.related_key) for item in current_results]
 
         to_attach = [i for i in target_ids if i not in current_ids]
         to_detach = [i for i in current_ids if i not in target_ids]
 
-        for rid in to_attach:
-            self.attach(rid)
-        for rid in to_detach:
-            self.detach(rid)
+        if to_attach:
+            self.attach(to_attach)
+        if to_detach:
+            self.detach(to_detach)
 
         self._clear_cache()
 
@@ -369,8 +451,7 @@ class Collection(list):
         return f"Collection({super().__repr__()})"
 
 
-
-class _RelationList(list):
+class _RelationList(Collection):
     def __init__(self, iterable, relation_factory: Callable[[], Relation]):
         super().__init__(iterable)
         self._relation_factory = relation_factory
@@ -379,11 +460,6 @@ class _RelationList(list):
         return self._relation_factory()
 
     def __getattr__(self, name: str) -> Any:
-        """
-        Proxy method agar jika method pivot seperti attach, detach, atau sync
-        dipanggil langsung pada hasil relasi (misal: user.roles.attach(...)),
-        method tersebut diteruskan ke objek relation aslinya.
-        """
         rel_obj = self._relation_factory()
         if hasattr(rel_obj, name):
             attr = getattr(rel_obj, name)
