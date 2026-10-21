@@ -149,8 +149,10 @@ class BelongsToMany(Relation):
 
     def _clear_cache(self) -> None:
         """Membersihkan cache relasi pada parent agar data ditarik ulang dari DB."""
-        for rel_name, rel_obj in list(self.parent._relations.items()):
-            if rel_obj is self or (hasattr(rel_obj, "_relation_factory") and rel_obj._relation_factory() is self):
+        for rel_name in list(self.parent._relations.keys()):
+            rel_instance = self.parent._resolve_relation_object(rel_name)
+            # Jika relasi pada key tersebut merujuk ke tabel pivot dan model yang sama, hapus cachenya!
+            if isinstance(rel_instance, BelongsToMany) and rel_instance.pivot_table == self.pivot_table:
                 del self.parent._relations[rel_name]
 
     def _add_constraints(self) -> None:
