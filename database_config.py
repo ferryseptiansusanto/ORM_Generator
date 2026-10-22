@@ -3,16 +3,14 @@
 import os
 
 # Ambil path root folder utama (POS_System) dengan naik 1 tingkat dari folder orm
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SQL_PATH = {
-    "default": {
-        "sql": os.path.join(BASE_DIR, "database", "database.sql")
-    }
+    "default": os.path.join(BASE_DIR, "database", "database.sql")
 }
 
 MODEL_PATH = {
-    "default": os.path.join(BASE_DIR, "model", "models.py")
+    "default": os.path.join(BASE_DIR, "model")
 }
 
 DATABASES = {

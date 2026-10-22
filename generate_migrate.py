@@ -13,12 +13,18 @@ def load_config(config_path):
         print(f"[ERROR] File konfigurasi database tidak ditemukan: {config_path}")
         sys.exit(1)
 
-    spec = importlib.util.spec_from_file_location("project_db_config", config_path)
+    # Ensure absolute path so importlib has a stable location
+    abs_config_path = os.path.abspath(config_path)
+
+    spec = importlib.util.spec_from_file_location("project_db_config", abs_config_path)
     if spec is None or spec.loader is None:
         print(f"[ERROR] Gagal memuat konfigurasi dari: {config_path}")
         sys.exit(1)
 
     module = importlib.util.module_from_spec(spec)
+    # Explicitly set __file__ because database_config.py may use it
+    module.__file__ = abs_config_path
+
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
@@ -68,14 +74,17 @@ def get_default_sql_path(sql_paths, config_path):
         sys.exit(1)
 
     default_sql = sql_paths["default"]
-    if not isinstance(default_sql, dict):
-        print("[ERROR] Konfigurasi 'default' di SQL_PATH harus berupa dictionary.")
-        sys.exit(1)
 
-    sql_path = default_sql.get("sql")
-    if not sql_path:
-        print("[ERROR] Kunci 'sql' tidak ditemukan atau kosong pada koneksi 'default' di SQL_PATH.")
-        sys.exit(1)
+    # Support both common formats:
+    # 1. SQL_PATH = {"default": "/path/to/database.sql"}
+    # 2. SQL_PATH = {"default": {"sql": "/path/to/database.sql"}}
+    if isinstance(default_sql, dict):
+        sql_path = default_sql.get("sql") or default_sql.get("path")
+        if not sql_path:
+            print("[ERROR] Kunci 'sql' atau 'path' tidak ditemukan pada default SQL_PATH.")
+            sys.exit(1)
+    else:
+        sql_path = default_sql
 
     sql_path = os.path.expanduser(os.path.expandvars(str(sql_path)))
 
