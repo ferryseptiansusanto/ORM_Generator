@@ -7,11 +7,18 @@ import importlib.util
 # Name of the environment variable that may point to database_config.py
 CONFIG_ENV_VAR = "ORM_DATABASE_CONFIG"
 
-# Default candidate filenames to search relative to the current working directory
+# Default candidate filenames to search relative to a base directory
 CONFIG_FILE_CANDIDATES = [
     "database_config.py",
     "config/database_config.py",
+    "Config/database_config.py",
 ]
+
+# Location of this ORM file: normally <main_program>/orm/database_manager.py
+LOCAL_ORM_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Assumed main program folder: the parent of the `orm` directory
+PROJECT_ROOT_DIR = os.path.dirname(LOCAL_ORM_DIR)
 
 
 def _load_config_from_path(path):
@@ -39,6 +46,29 @@ def _load_config_from_path(path):
     return module
 
 
+def _find_config_file():
+    """Search for database_config.py in a number of likely base dirs."""
+    base_dirs = []
+    cwd = os.getcwd()
+    if cwd not in base_dirs:
+        base_dirs.append(cwd)
+
+    if PROJECT_ROOT_DIR not in base_dirs:
+        base_dirs.append(PROJECT_ROOT_DIR)
+
+    # In case the ORM folder itself contains a config file
+    if LOCAL_ORM_DIR not in base_dirs:
+        base_dirs.append(LOCAL_ORM_DIR)
+
+    for base_dir in base_dirs:
+        for candidate in CONFIG_FILE_CANDIDATES:
+            candidate_path = os.path.join(base_dir, candidate)
+            if os.path.isfile(candidate_path):
+                return candidate_path
+
+    return None
+
+
 def _load_database_config():
     """Locate and load database_config.py from several possible locations."""
     # 1. Environment variable override
@@ -48,12 +78,10 @@ def _load_database_config():
         if os.path.isfile(env_path):
             return _load_config_from_path(env_path)
 
-    # 2. Candidate files in current working directory
-    cwd = os.getcwd()
-    for candidate in CONFIG_FILE_CANDIDATES:
-        candidate_path = os.path.join(cwd, candidate)
-        if os.path.isfile(candidate_path):
-            return _load_config_from_path(candidate_path)
+    # 2. Candidate files relative to cwd, main project folder, and orm folder
+    config_path = _find_config_file()
+    if config_path is not None:
+        return _load_config_from_path(config_path)
 
     # 3. Fallback to direct import (original behaviour)
     import database_config  # noqa: F401
