@@ -1,5 +1,11 @@
 # database_config.py
 
+
+import os
+
+# Ambil path root folder utama (POS_System) dengan naik 1 tingkat dari folder orm
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 DATABASES = {
     "default": {
         "driver": "sqlite",
