@@ -44,9 +44,9 @@ def run_migration():
         cursor = conn.cursor()
 
         print("[INFO] Membuat tabel-tabel database...")
-
+        abs_sql_file = os.path.abspath(os.path.join(old_cwd, sql_file))
         # Baca seluruh isi file SQL
-        with open(sql_file, "r", encoding="utf-8") as f:
+        with open(abs_sql_file, "r", encoding="utf-8") as f:
             sql_script = f.read()
 
         # Jalankan seluruh script SQL
