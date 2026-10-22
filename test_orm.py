@@ -1,10 +1,6 @@
 # test_orm.py
 from models import User, Post, Role,Transaction
 
-
-
-
-
 # Masukkan data dummy
 user = User.create(username="ferry_dev", email="ferry@example.com")
 print("User dibuat:", user)

@@ -5,3 +5,5 @@ __pycache__/
 models.py
 identifier.sqlite
 demo_*.py
+# Aider configuration and history files
+.aider*
