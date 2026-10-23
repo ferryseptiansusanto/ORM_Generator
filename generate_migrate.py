@@ -1,41 +1,16 @@
 import os
 import sys
-import importlib.util
 import sqlite3
+from pathlib import Path
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-
-def load_config(config_path):
-    if not os.path.isfile(config_path):
-        print(f"[ERROR] File konfigurasi database tidak ditemukan: {config_path}")
-        sys.exit(1)
-
-    # Ensure absolute path so importlib has a stable location
-    abs_config_path = os.path.abspath(config_path)
-
-    spec = importlib.util.spec_from_file_location("project_db_config", abs_config_path)
-    if spec is None or spec.loader is None:
-        print(f"[ERROR] Gagal memuat konfigurasi dari: {config_path}")
-        sys.exit(1)
-
-    module = importlib.util.module_from_spec(spec)
-    # Explicitly set __file__ because database_config.py may use it
-    module.__file__ = abs_config_path
-
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        print(f"[ERROR] Terjadi kesalahan saat memuat konfigurasi: {exc}")
-        sys.exit(1)
-
-    if not hasattr(module, "DATABASES"):
-        print(f"[ERROR] File konfigurasi tidak memiliki variabel DATABASES: {config_path}")
-        sys.exit(1)
-
-    return module
+# Load configuration directly from database_config.py in the same directory.
+# The database_config module already reads .env and resolves relative paths
+# against the directory where .env is located.
+import database_config as project_db_config
 
 
 def get_default_database_path(databases, config_path):
@@ -53,15 +28,17 @@ def get_default_database_path(databases, config_path):
         print("[ERROR] Kunci 'database' tidak ditemukan atau kosong pada koneksi 'default'.")
         sys.exit(1)
 
+    # Expand environment variables and user home
     db_path = os.path.expanduser(os.path.expandvars(str(db_path)))
 
-    if os.path.isabs(db_path):
-        abs_db_path = db_path
-    else:
-        config_dir = os.path.dirname(os.path.abspath(config_path))
-        abs_db_path = os.path.join(config_dir, db_path)
+    # database_config.py already resolves relative paths to absolute paths.
+    # If for some reason the value is still relative, resolve it against the config file directory.
+    db_path_obj = Path(db_path)
+    if not db_path_obj.is_absolute():
+        config_dir = Path(os.path.dirname(os.path.abspath(config_path)))
+        db_path_obj = config_dir / db_path_obj
 
-    return abs_db_path
+    return str(db_path_obj)
 
 
 def get_default_sql_path(sql_paths, config_path):
@@ -88,56 +65,46 @@ def get_default_sql_path(sql_paths, config_path):
 
     sql_path = os.path.expanduser(os.path.expandvars(str(sql_path)))
 
-    if os.path.isabs(sql_path):
-        abs_sql_path = sql_path
-    else:
-        config_dir = os.path.dirname(os.path.abspath(config_path))
-        abs_sql_path = os.path.join(config_dir, sql_path)
+    sql_path_obj = Path(sql_path)
+    if not sql_path_obj.is_absolute():
+        config_dir = Path(os.path.dirname(os.path.abspath(config_path)))
+        sql_path_obj = config_dir / sql_path_obj
 
-    return abs_sql_path
+    return str(sql_path_obj)
 
 
 def run_migration():
-    if len(sys.argv) < 2:
-        print("Usage: python generate_migrate.py <path_to_database_config.py>")
-        sys.exit(1)
-
-    raw_config = sys.argv[1]
-    raw_config = os.path.expanduser(os.path.expandvars(raw_config))
-
-    if not os.path.isfile(raw_config):
-        print(f"[ERROR] File konfigurasi database tidak ditemukan: {raw_config}")
-        sys.exit(1)
-
-    config_module = load_config(raw_config)
+    # Gunakan konfigurasi dari database_config.py yang sudah memuat .env.
+    # Tidak lagi memerlukan argument path file konfigurasi.
+    config_module = project_db_config
 
     databases = config_module.DATABASES
     sql_paths = getattr(config_module, "SQL_PATH", None)
 
-    abs_db_path = get_default_database_path(databases, raw_config)
-    db_dir = os.path.dirname(abs_db_path)
+    config_path = config_module.__file__ or os.path.join(CURRENT_DIR, "database_config.py")
 
-    os.makedirs(db_dir, exist_ok=True)
+    abs_db_path = get_default_database_path(databases, config_path)
+    db_dir = Path(abs_db_path).parent
 
-    print(f"[INFO] Membaca konfigurasi dari: {raw_config}")
+    db_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[INFO] Membaca konfigurasi dari: {config_path}")
     print(f"[INFO] Database target: {abs_db_path}")
 
-    abs_sql_path = get_default_sql_path(sql_paths, raw_config)
+    abs_sql_path = get_default_sql_path(sql_paths, config_path)
 
-    if not os.path.isfile(abs_sql_path):
+    if not Path(abs_sql_path).is_file():
         print(f"[ERROR] File SQL tidak ditemukan: {abs_sql_path}")
         sys.exit(1)
 
-    if os.path.exists(abs_db_path):
-        os.remove(abs_db_path)
+    if Path(abs_db_path).exists():
+        Path(abs_db_path).unlink()
         print(f"[INFO] Database lama '{abs_db_path}' dihapus.")
 
     print(f"[INFO] Membaca file SQL dari: {abs_sql_path}")
     print(f"[INFO] File database baru akan dibuat di: {abs_db_path}")
 
     # Gunakan koneksi sqlite3 langsung dengan path absolut.
-    # Ini menghindari masalah direktori kerja aktif yang mempengaruhi
-    # pembentukan path relatif pada database_manager.
     connection = sqlite3.connect(abs_db_path)
     try:
         cursor = connection.cursor()
@@ -151,7 +118,12 @@ def run_migration():
     finally:
         connection.close()
 
-    print(f"[OK] Migrasi tabel berhasil! Database '{abs_db_path}' siap digunakan.")
+    # Verify the database file was actually created
+    if Path(abs_db_path).is_file():
+        print(f"[OK] Migrasi tabel berhasil! Database '{abs_db_path}' siap digunakan.")
+    else:
+        print(f"[ERROR] Database tidak ditemukan setelah migrasi: {abs_db_path}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

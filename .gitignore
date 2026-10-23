@@ -7,3 +7,6 @@ identifier.sqlite
 demo_*.py
 # Aider configuration and history files
 .aider*
+test_*.py
+demo_*.py
+.env

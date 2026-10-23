@@ -1,7 +1,12 @@
 # orm_generator.py
+import os
+import sys
+import inflect
 from typing import List, Dict, Any, Optional, Tuple
 from database_manager import DatabaseManager
 
+# Inisialisasi engine inflect secara global
+p = inflect.engine()
 
 class ORMGenerator:
     """
@@ -42,24 +47,14 @@ class ORMGenerator:
 
     @staticmethod
     def _singularize(word: str) -> str:
-        """Mengubah kata plural bahasa Inggris menjadi singular secara akurat."""
-        irregular_map = {
-            "categories": "category",
-            "companies": "company",
-            "people": "person",
-            "children": "child",
-            "men": "man",
-            "women": "woman",
-        }
-        if word in irregular_map:
-            return irregular_map[word]
-        if word.endswith("ies"):
-            return word[:-3] + "y"
-        if word.endswith("ses") or word.endswith("xes") or word.endswith("zes"):
-            return word[:-2]
-        if word.endswith("s") and not word.endswith("ss") and not word.endswith("us"):
-            return word[:-1]
-        return word
+        """
+        Mengubah kata plural bahasa Inggris menjadi singular secara akurat
+        menggunakan library 'inflect' standar industri.
+        """
+        singular = p.singular_noun(word)
+        # Jika p.singular_noun mengembalikan False (berarti kata sudah singular atau tidak dikenali),
+        # maka gunakan kata aslinya.
+        return singular if singular else word
 
     @classmethod
     def _snake_to_studly(cls, snake_str: str) -> str:
@@ -97,7 +92,6 @@ class ORMGenerator:
                 if target_t and target_t != table:
                     fk_cols.append({"col": c_name, "prefix": prefix, "target_table": target_t})
             elif c_name not in allowed_extra:
-                # Memiliki kolom atribut bisnis biasa (misal: 'name', 'price'), bukan tabel pivot murni
                 return None
 
         if len(fk_cols) != 2:
@@ -107,7 +101,6 @@ class ORMGenerator:
         if fk1["target_table"] == fk2["target_table"]:
             return None
 
-        # Validasi konvensi penamaan tabel pivot (misal: role_user, user_role, atau users_roles)
         valid_names = {
             f"{fk1['prefix']}_{fk2['prefix']}",
             f"{fk2['prefix']}_{fk1['prefix']}",
@@ -130,11 +123,8 @@ class ORMGenerator:
         table_columns_map = {t: self._get_table_columns(t) for t in tables}
         table_to_class = {t: self._snake_to_studly(t) for t in tables}
 
-        # --- PASS 1: Deteksi Tabel Pivot (Many-to-Many) & Relasi Polimorfik ---
         pivot_tables = set()
-        # Struktur: { table_name: [ {method_name, related_class, pivot_table, foreign_pivot_key, related_pivot_key} ] }
         belongs_to_many_map: Dict[str, List[Dict[str, str]]] = {t: [] for t in tables}
-        # Daftar informasi polimorfik untuk komentar bantuan
         polymorphic_children: List[Dict[str, str]] = []
 
         for table in tables:
@@ -144,25 +134,22 @@ class ORMGenerator:
                 pivot_tables.add(table)
                 fk1, fk2 = pivot_info
 
-                # Daftarkan BelongsToMany pada Tabel 1 -> Tabel 2
                 belongs_to_many_map[fk1["target_table"]].append({
-                    "method_name": fk2["target_table"],  # bentuk plural, misal: roles
+                    "method_name": fk2["target_table"],
                     "related_class": table_to_class[fk2["target_table"]],
                     "pivot_table": table,
                     "foreign_pivot_key": fk1["col"],
                     "related_pivot_key": fk2["col"],
                 })
 
-                # Daftarkan BelongsToMany pada Tabel 2 -> Tabel 1
                 belongs_to_many_map[fk2["target_table"]].append({
-                    "method_name": fk1["target_table"],  # bentuk plural, misal: users
+                    "method_name": fk1["target_table"],
                     "related_class": table_to_class[fk1["target_table"]],
                     "pivot_table": table,
                     "foreign_pivot_key": fk2["col"],
                     "related_pivot_key": fk1["col"],
                 })
 
-        # --- PASS 2: Bangun Kode Class untuk Setiap Tabel Model ---
         model_codes = [
             "# File ini di-generate secara otomatis oleh orm_generator.py",
             "# Jangan diubah secara manual kecuali untuk menambahkan Scopes, Accessors, Mutators, atau Observers.",
@@ -185,11 +172,10 @@ class ORMGenerator:
             foreign_keys = []
             morph_tos = []
 
-            # Deteksi pasangan kolom Polymorphic (<morph>_id dan <morph>_type)
             morph_columns = set()
             for c_name in col_names_set:
                 if c_name.endswith("_type"):
-                    morph_prefix = c_name[:-5]  # misal: 'commentable' dari 'commentable_type'
+                    morph_prefix = c_name[:-5]
                     id_pair = f"{morph_prefix}_id"
                     if id_pair in col_names_set:
                         morph_tos.append(morph_prefix)
@@ -215,7 +201,6 @@ class ORMGenerator:
                 elif not is_pk and col_name not in ("created_at", "updated_at", "deleted_at"):
                     fillable_cols.append(col_name)
 
-                # Deteksi Foreign Key reguler (abaikan jika merupakan bagian dari kolom polymorphic)
                 if col_name.endswith("_id") and col_name != primary_key and col_name not in morph_columns:
                     prefix = col_name[:-3]
                     ref_table = self._resolve_target_table(prefix, tables)
@@ -227,7 +212,6 @@ class ORMGenerator:
                             "relation_name": prefix
                         })
 
-            # Susun kerangka atribut class Model
             lines = [
                 f"class {class_name}(Model):",
                 f"    connection_name = \"{self.connection_name}\"",
@@ -243,7 +227,6 @@ class ORMGenerator:
 
             lines.append("")
 
-            # 1. Generate relasi BelongsTo
             for fk in foreign_keys:
                 lines.extend([
                     "    @relation",
@@ -252,7 +235,6 @@ class ORMGenerator:
                     ""
                 ])
 
-            # 2. Generate relasi HasMany (dari tabel non-pivot lain yang mengarah ke tabel ini)
             singular_self = "_".join(table.split("_")[:-1] + [self._singularize(table.split("_")[-1])])
             expected_fk = f"{singular_self}_id"
 
@@ -270,7 +252,6 @@ class ORMGenerator:
                             ""
                         ])
 
-            # 3. Generate relasi BelongsToMany (Pivot Table)
             for btm in belongs_to_many_map.get(table, []):
                 lines.extend([
                     "    @relation",
@@ -284,7 +265,6 @@ class ORMGenerator:
                     ""
                 ])
 
-            # 4. Generate relasi Polymorphic MorphTo
             for morph_name in morph_tos:
                 lines.extend([
                     "    @relation",
@@ -295,7 +275,6 @@ class ORMGenerator:
 
             model_codes.append("\n".join(lines).rstrip())
 
-        # Tambahkan petunjuk otomatis jika ada tabel Polimorfik yang terdeteksi
         if polymorphic_children:
             hint_lines = [
                 "",

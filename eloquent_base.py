@@ -148,51 +148,66 @@ class BelongsToMany(Relation):
 
     @staticmethod
     def _extract_row_val(row: Any, key: str, idx: int = 0) -> Any:
-        if isinstance(row, dict):
-            return row[key]
+        # PERBAIKAN: Prioritaskan index (0) karena query pivot hanya me-return 1 kolom spesifik
         try:
-            return row[key]
-        except (KeyError, TypeError, IndexError):
             return row[idx]
+        except Exception:
+            pass
+        try:
+            if isinstance(row, dict):
+                return row[key]
+            return row[key]
+        except Exception:
+            return None
 
     def _clear_cache(self) -> None:
         """Membersihkan cache relasi pada parent agar data ditarik ulang dari DB."""
         for rel_name in list(self.parent._relations.keys()):
             rel_instance = self.parent._resolve_relation_object(rel_name)
-            # Jika relasi pada key tersebut merujuk ke tabel pivot dan model yang sama, hapus cachenya!
             if isinstance(rel_instance, BelongsToMany) and rel_instance.pivot_table == self.pivot_table:
                 del self.parent._relations[rel_name]
 
     def _add_constraints(self) -> None:
-        if self.parent._exists:
-            parent_val = self.parent._attributes.get(self.parent_key)
-            table = self.related_cls.get_table_name()
-            pk = self.related_cls.primary_key
+        parent_val = self.parent._attributes.get(self.parent_key)
+
+        # PERBAIKAN: Jika _exists False TAPI model punya Primary Key, tetap izinkan query!
+        if not self.parent._exists and not parent_val:
             self.query = self.related_cls.query()
-            self.query._selects = [f"{table}.*"]
+            self.query.where(self.related_cls.primary_key, "=", -1)
+            return
 
-            conn = DatabaseManager.get_connection(self.parent.connection_name)
-            cursor = conn.cursor()
-            pivot_sql = f"SELECT {self.related_pivot_key} FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ?"
-            cursor.execute(pivot_sql, (parent_val,))
-            related_ids = [
-                self._extract_row_val(row, self.related_pivot_key, 0)
-                for row in cursor.fetchall()
-            ]
+        table = self.related_cls.get_table_name()
+        pk = self.related_cls.primary_key
+        self.query = self.related_cls.query()
+        self.query._selects = [f"{table}.*"]
 
-            if related_ids:
-                self.query.where_in(pk, related_ids)
-            else:
-                self.query.where(pk, "=", -1)
+        conn = DatabaseManager.get_connection(self.parent.connection_name)
+        cursor = conn.cursor()
+        pivot_sql = f"SELECT {self.related_pivot_key} FROM {self.pivot_table} WHERE {self.foreign_pivot_key} = ?"
+        cursor.execute(pivot_sql, (parent_val,))
+
+        rows = cursor.fetchall()
+        related_ids = []
+        for r in rows:
+            val = self._extract_row_val(r, self.related_pivot_key, 0)
+            if val is not None:
+                related_ids.append(val)
+
+        if related_ids:
+            self.query.where_in(pk, related_ids)
+        else:
+            self.query.where(pk, "=", -1)
 
     def get_results(self) -> 'Collection':
-        if not self.parent._exists:
+        parent_val = self.parent._attributes.get(self.parent_key)
+        # PERBAIKAN: Sinkronkan pengecekan bypass dengan method attach
+        if not self.parent._exists and not parent_val:
             return Collection([])
+
         self._add_constraints()
         return self.query.get()
 
     def match_eager(self, models: List['Model'], relation_name: str, nested: List[str] = None) -> None:
-        """Mendukung Eager Loading (.with_('roles')) pada relasi Many-to-Many."""
         parent_keys = list({
             m._attributes.get(self.parent_key)
             for m in models
@@ -244,11 +259,11 @@ class BelongsToMany(Relation):
             m._relations[relation_name] = Collection(grouped.get(pk_val, []))
 
     def attach(self, id_or_model: Union[int, 'Model', List[Union[int, 'Model']]]) -> None:
-        if not self.parent._exists:
+        parent_val = self.parent._attributes.get(self.parent_key)
+        if not self.parent._exists and not parent_val:
             raise ValueError("Tidak dapat melakukan attach pada model yang belum disimpan ke database.")
 
         items = id_or_model if isinstance(id_or_model, (list, tuple, set)) else [id_or_model]
-        parent_val = self.parent._attributes.get(self.parent_key)
 
         conn = DatabaseManager.get_connection(self.parent.connection_name)
         cursor = conn.cursor()
@@ -271,10 +286,10 @@ class BelongsToMany(Relation):
         self._clear_cache()
 
     def detach(self, id_or_model: Optional[Union[int, 'Model', List[Union[int, 'Model']]]] = None) -> None:
-        if not self.parent._exists:
+        parent_val = self.parent._attributes.get(self.parent_key)
+        if not self.parent._exists and not parent_val:
             return
 
-        parent_val = self.parent._attributes.get(self.parent_key)
         conn = DatabaseManager.get_connection(self.parent.connection_name)
         cursor = conn.cursor()
 
@@ -310,7 +325,6 @@ class BelongsToMany(Relation):
             self.detach(to_detach)
 
         self._clear_cache()
-
 
 class MorphMany(Relation):
     def __init__(self, related_cls: Type['Model'], parent: 'Model', morph_name: str):
