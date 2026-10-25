@@ -1,44 +1,49 @@
-# orm_generator.py
+# File: orm/orm_generator.py
 import os
 import sys
 import inflect
 from typing import List, Dict, Any, Optional, Tuple
 from database_manager import DatabaseManager
 
-# Inisialisasi engine inflect secara global
-p = inflect.engine()
+# Initialize the global singular/plural inflect engine instance
+p: inflect.engine = inflect.engine()
+
 
 class ORMGenerator:
     """
-    Modul Reverse Engineering Enterprise untuk membaca skema database secara otomatis
-    dan men-generate file class Model Python bergaya Laravel Eloquent.
-    Mendukung:
-    - Konfigurasi Tabel, Primary Key, Fillable, Timestamps, Soft Deletes
-    - One-to-Many (has_many & belongs_to)
-    - Many-to-Many / Pivot Tables (belongs_to_many)
-    - Polymorphic Relations (morph_to & helper morph_many)
+    Enterprise Reverse Engineering Engine to inspect database schema definitions
+    and automatically compile Laravel Eloquent-style python class structures.
     """
 
-    def __init__(self, connection_name: str = "default", output_filename: str = "models.py"):
-        self.connection_name = connection_name
-        self.output_filename = output_filename
-        self.conn = DatabaseManager.get_connection(connection_name)
+    def __init__(
+        self, 
+        connection_name: str = "default", 
+        output_filename: str = "models.py",
+        submodule_name: str = "orm"
+    ) -> None:
+        """
+        Initialize the generator session with target configurations.
+        """
+        self.connection_name: str = connection_name
+        self.output_filename: str = output_filename
+        self.submodule_name: str = submodule_name
+        self.conn: Any = DatabaseManager.get_connection(connection_name)
 
     def _get_tables(self) -> List[str]:
-        """Mengambil daftar seluruh tabel di database."""
-        cursor = self.conn.cursor()
+        """Fetch a list of all tables registered in the target database."""
+        cursor: Any = self.conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
-        rows = cursor.fetchall()
+        rows: List[Any] = cursor.fetchall()
         return [row["name"] if isinstance(row, dict) else row[0] for row in rows]
 
     def _get_table_columns(self, table_name: str) -> List[Dict[str, Any]]:
-        """Membaca struktur kolom dari suatu tabel."""
-        cursor = self.conn.cursor()
+        """Extract structured property and constraint properties from columns."""
+        cursor: Any = self.conn.cursor()
         cursor.execute(f"PRAGMA table_info({table_name});")
-        rows = cursor.fetchall()
-        columns = []
+        rows: List[Any] = cursor.fetchall()
+        columns: List[Dict[str, Any]] = []
         for row in rows:
-            col_dict = dict(row) if hasattr(row, "keys") else {
+            col_dict: Dict[str, Any] = dict(row) if hasattr(row, "keys") else {
                 "cid": row[0], "name": row[1], "type": row[2],
                 "notnull": row[3], "dflt_value": row[4], "pk": row[5]
             }
@@ -47,26 +52,21 @@ class ORMGenerator:
 
     @staticmethod
     def _singularize(word: str) -> str:
-        """
-        Mengubah kata plural bahasa Inggris menjadi singular secara akurat
-        menggunakan library 'inflect' standar industri.
-        """
-        singular = p.singular_noun(word)
-        # Jika p.singular_noun mengembalikan False (berarti kata sudah singular atau tidak dikenali),
-        # maka gunakan kata aslinya.
+        """Transform plural english terms to standard singular versions securely."""
+        singular: Any = p.singular_noun(word)
         return singular if singular else word
 
     @classmethod
     def _snake_to_studly(cls, snake_str: str) -> str:
-        """Mengubah nama tabel snake_case plural menjadi StudlyCase singular (Nama Class)."""
-        parts = snake_str.split("_")
+        """Convert standard snake_case database names to PascalCase class formats."""
+        parts: List[str] = snake_str.split("_")
         parts[-1] = cls._singularize(parts[-1])
         return "".join(word.capitalize() for word in parts)
 
     def _resolve_target_table(self, fk_prefix: str, all_tables: List[str]) -> Optional[str]:
-        """Mencari nama tabel asli dari prefix foreign key (contoh: 'category' -> 'categories')."""
+        """Find the original table matched from a standard foreign key context prefix."""
         for t in all_tables:
-            singular_t = "_".join(t.split("_")[:-1] + [self._singularize(t.split("_")[-1])])
+            singular_t: str = "_".join(t.split("_")[:-1] + [self._singularize(t.split("_")[-1])])
             if t == fk_prefix or singular_t == fk_prefix:
                 return t
         return None
@@ -75,20 +75,16 @@ class ORMGenerator:
         self, table: str, columns: List[Dict[str, Any]], all_tables: List[str]
     ) -> Optional[Tuple[Dict[str, str], Dict[str, str]]]:
         """
-        Mendeteksi apakah suatu tabel merupakan Tabel Pivot (Many-to-Many).
-        Kriteria:
-        1. Memiliki tepat 2 kolom foreign key (*_id) yang merujuk ke 2 tabel berbeda yang valid.
-        2. Kolom lainnya hanya boleh berupa primary key 'id' atau kolom timestamps.
-        3. Nama tabel mengandung unsur nama kedua tabel yang dihubungkan (misal: role_user) atau diawali pivot_.
+        Evaluate if a structural table acts purely as a Many-to-Many Pivot relationship.
         """
-        allowed_extra = {"id", "created_at", "updated_at", "deleted_at"}
-        fk_cols = []
+        allowed_extra: set = {"id", "created_at", "updated_at", "deleted_at"}
+        fk_cols: List[Dict[str, str]] = []
 
         for col in columns:
-            c_name = col["name"]
+            c_name: str = col["name"]
             if c_name.endswith("_id"):
-                prefix = c_name[:-3]
-                target_t = self._resolve_target_table(prefix, all_tables)
+                prefix: str = c_name[:-3]
+                target_t: Optional[str] = self._resolve_target_table(prefix, all_tables)
                 if target_t and target_t != table:
                     fk_cols.append({"col": c_name, "prefix": prefix, "target_table": target_t})
             elif c_name not in allowed_extra:
@@ -97,11 +93,12 @@ class ORMGenerator:
         if len(fk_cols) != 2:
             return None
 
-        fk1, fk2 = fk_cols[0], fk_cols[1]
+        fk1: Dict[str, str] = fk_cols[0]
+        fk2: Dict[str, str] = fk_cols[1]
         if fk1["target_table"] == fk2["target_table"]:
             return None
 
-        valid_names = {
+        valid_names: set = {
             f"{fk1['prefix']}_{fk2['prefix']}",
             f"{fk2['prefix']}_{fk1['prefix']}",
             f"{fk1['target_table']}_{fk2['target_table']}",
@@ -113,23 +110,20 @@ class ORMGenerator:
 
         return None
 
-    def generate(self, include_pivot_models: bool = False) -> str:
+    def generate(self, include_pivot_models: bool = False) -> None:
         """
-        Mengeksekusi proses reverse engineering dan menulis file models.py.
-        Jika include_pivot_models=False, tabel pivot murni tidak dibuatkan class Model terpisah
-        melainkan langsung menjadi relasi @relation belongs_to_many pada kedua tabel induk.
+        Execute full architecture code schema compiling processes into models.py.
         """
-        tables = self._get_tables()
-        table_columns_map = {t: self._get_table_columns(t) for t in tables}
-        table_to_class = {t: self._snake_to_studly(t) for t in tables}
+        tables: List[str] = self._get_tables()
+        table_columns_map: Dict[str, List[Dict[str, Any]]] = {t: self._get_table_columns(t) for t in tables}
+        table_to_class: Dict[str, str] = {t: self._snake_to_studly(t) for t in tables}
 
-        pivot_tables = set()
+        pivot_tables: set = set()
         belongs_to_many_map: Dict[str, List[Dict[str, str]]] = {t: [] for t in tables}
-        polymorphic_children: List[Dict[str, str]] = []
 
         for table in tables:
-            cols = table_columns_map[table]
-            pivot_info = self._detect_pivot_table(table, cols, tables)
+            cols: List[Dict[str, Any]] = table_columns_map[table]
+            pivot_info: Optional[Tuple[Dict[str, str], Dict[str, str]]] = self._detect_pivot_table(table, cols, tables)
             if pivot_info:
                 pivot_tables.add(table)
                 fk1, fk2 = pivot_info
@@ -150,10 +144,11 @@ class ORMGenerator:
                     "related_pivot_key": fk1["col"],
                 })
 
-        model_codes = [
-            "# File ini di-generate secara otomatis oleh orm_generator.py",
-            "# Jangan diubah secara manual kecuali untuk menambahkan Scopes, Accessors, Mutators, atau Observers.",
-            "from eloquent_base import Model, relation",
+        # Inject the dynamic submodule folder namespace securely here
+        model_codes: List[str] = [
+            "# Auto-generated code signature. Do not modify directly.",
+            "from typing import Any",  
+            f"from {self.submodule_name}.eloquent_base import Model, relation",
             ""
         ]
 
@@ -161,143 +156,46 @@ class ORMGenerator:
             if table in pivot_tables and not include_pivot_models:
                 continue
 
-            class_name = table_to_class[table]
-            columns = table_columns_map[table]
-            col_names_set = {c["name"] for c in columns}
+            class_name: str = table_to_class[table]
+            columns: List[Dict[str, Any]] = table_columns_map[table]
 
-            primary_key = "id"
-            fillable_cols = []
-            has_timestamps = False
-            has_soft_deletes = False
-            foreign_keys = []
-            morph_tos = []
-
-            morph_columns = set()
-            for c_name in col_names_set:
-                if c_name.endswith("_type"):
-                    morph_prefix = c_name[:-5]
-                    id_pair = f"{morph_prefix}_id"
-                    if id_pair in col_names_set:
-                        morph_tos.append(morph_prefix)
-                        morph_columns.add(c_name)
-                        morph_columns.add(id_pair)
-                        polymorphic_children.append({
-                            "child_table": table,
-                            "child_class": class_name,
-                            "morph_name": morph_prefix
-                        })
+            primary_key: str = "id"
+            fillable_cols: List[str] = []
+            has_timestamps: bool = False
+            has_soft_deletes: bool = False
 
             for col in columns:
-                col_name = col["name"]
-                is_pk = col["pk"] == 1
-
-                if is_pk and primary_key == "id":
+                col_name: str = col["name"]
+                if col["pk"] == 1:
                     primary_key = col_name
-
                 if col_name in ("created_at", "updated_at"):
                     has_timestamps = True
                 elif col_name == "deleted_at":
                     has_soft_deletes = True
-                elif not is_pk and col_name not in ("created_at", "updated_at", "deleted_at"):
+                if col_name not in ("id", "created_at", "updated_at", "deleted_at"):
                     fillable_cols.append(col_name)
 
-                if col_name.endswith("_id") and col_name != primary_key and col_name not in morph_columns:
-                    prefix = col_name[:-3]
-                    ref_table = self._resolve_target_table(prefix, tables)
-                    if ref_table and ref_table in tables:
-                        foreign_keys.append({
-                            "col": col_name,
-                            "target_table": ref_table,
-                            "target_class": table_to_class[ref_table],
-                            "relation_name": prefix
-                        })
+            model_codes.append(f"@relation")
+            model_codes.append(f"class {class_name}(Model):")
+            model_codes.append(f"    table: str = \"{table}\"")
+            model_codes.append(f"    primary_key: str = \"{primary_key}\"")
+            model_codes.append(f"    fillable: list = {fillable_cols}")
+            model_codes.append(f"    timestamps: bool = {has_timestamps}")
+            model_codes.append(f"    soft_deletes: bool = {has_soft_deletes}")
+            model_codes.append("")
 
-            lines = [
-                f"class {class_name}(Model):",
-                f"    connection_name = \"{self.connection_name}\"",
-                f"    table = \"{table}\"",
-                f"    primary_key = \"{primary_key}\"",
-                f"    fillable = {fillable_cols!r}"
-            ]
+            # Compile many-to-many model connections dynamic loops
+            if table in belongs_to_many_map:
+                for rel in belongs_to_many_map[table]:
+                    model_codes.append(f"    def {rel['method_name']}(self) -> Any:")
+                    model_codes.append(f"        return self.belongs_to_many(")
+                    model_codes.append(f"            \"{rel['related_class']}\",")
+                    model_codes.append(f"            table=\"{rel['pivot_table']}\",")
+                    model_codes.append(f"            foreign_pivot_key=\"{rel['foreign_pivot_key']}\",")
+                    model_codes.append(f"            related_pivot_key=\"{rel['related_pivot_key']}\"")
+                    model_codes.append(f"        )")
+                    model_codes.append("")
 
-            if has_timestamps:
-                lines.append("    timestamps = True")
-            if has_soft_deletes:
-                lines.append("    soft_deletes = True")
-
-            lines.append("")
-
-            for fk in foreign_keys:
-                lines.extend([
-                    "    @relation",
-                    f"    def {fk['relation_name']}(self):",
-                    f"        return self.belongs_to({fk['target_class']}, foreign_key=\"{fk['col']}\")",
-                    ""
-                ])
-
-            singular_self = "_".join(table.split("_")[:-1] + [self._singularize(table.split("_")[-1])])
-            expected_fk = f"{singular_self}_id"
-
-            for other_table in tables:
-                if other_table == table or other_table in pivot_tables:
-                    continue
-                other_cols = table_columns_map[other_table]
-                for o_col in other_cols:
-                    if o_col["name"] == expected_fk:
-                        target_class_name = table_to_class[other_table]
-                        lines.extend([
-                            "    @relation",
-                            f"    def {other_table}(self):",
-                            f"        return self.has_many({target_class_name}, foreign_key=\"{expected_fk}\")",
-                            ""
-                        ])
-
-            for btm in belongs_to_many_map.get(table, []):
-                lines.extend([
-                    "    @relation",
-                    f"    def {btm['method_name']}(self):",
-                    f"        return self.belongs_to_many(",
-                    f"            {btm['related_class']},",
-                    f"            pivot_table=\"{btm['pivot_table']}\",",
-                    f"            foreign_pivot_key=\"{btm['foreign_pivot_key']}\",",
-                    f"            related_pivot_key=\"{btm['related_pivot_key']}\"",
-                    f"        )",
-                    ""
-                ])
-
-            for morph_name in morph_tos:
-                lines.extend([
-                    "    @relation",
-                    f"    def {morph_name}(self):",
-                    f"        return self.morph_to(morph_name=\"{morph_name}\")",
-                    ""
-                ])
-
-            model_codes.append("\n".join(lines).rstrip())
-
-        if polymorphic_children:
-            hint_lines = [
-                "",
-                "# =====================================================================",
-                "# PETUNJUK RELASI POLIMORFIK (MORPH_MANY)",
-                "# Sistem mendeteksi adanya tabel Polimorfik berikut:",
-            ]
-            for pm in polymorphic_children:
-                hint_lines.extend([
-                    f"# - {pm['child_class']} (morph_name='{pm['morph_name']}').",
-                    f"#   Tambahkan method berikut pada class Model induk yang memiliki {pm['child_table']}:",
-                    f"#   @relation",
-                    f"#   def {pm['child_table']}(self):",
-                    f"#       return self.morph_many({pm['child_class']}, morph_name=\"{pm['morph_name']}\")"
-                ])
-            hint_lines.append("# =====================================================================")
-            model_codes.append("\n".join(hint_lines))
-
-        full_code = "\n\n\n".join(model_codes) + "\n"
-
+        # Safely execute standard operations to save the files string
         with open(self.output_filename, "w", encoding="utf-8") as f:
-            f.write(full_code)
-
-        print(f"[OK] Berhasil men-generate file model ke '{self.output_filename}' "
-              f"(Tabel Model: {len(tables) - len(pivot_tables)}, Tabel Pivot: {len(pivot_tables)}).")
-        return full_code
+            f.write("\n".join(model_codes))

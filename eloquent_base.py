@@ -2,7 +2,7 @@
 import inspect
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
-from database_manager import DatabaseManager
+from .database_manager import DatabaseManager
 
 class MassAssignmentError(Exception):
     """Exception ketika mencoba melakukan mass assignment pada model tanpa konfigurasi fillable yang valid."""
